@@ -9,7 +9,8 @@ from tkinter import filedialog, messagebox
 from tkinter import ttk
 
 import requests
-
+from camoufox.sync_api import Camoufox
+import time
 
 def organize_files_by_type(user_dir):
     """
@@ -41,7 +42,18 @@ def organize_files_by_type(user_dir):
                 if not os.path.exists(dest_path):
                     shutil.move(file_path, dest_path)
 
+def scrape_html(username, times=5):
+    with Camoufox() as browser:
+        page = browser.new_page()
+        page.goto("https://gramsnap.com/en/")
+        page.get_by_role("textbox", name="@username or link").fill(username)
+        page.get_by_role("button", name="Search").click()
+        for _ in range(times):
+            page.keyboard.press('End')
+            page.evaluate("window.scrollBy(0, -1000)")
+            time.sleep(2)
 
+        return page.locator("ul.profile-media-list").inner_html()
 class TASK2ManualInstaGuiApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -51,8 +63,7 @@ class TASK2ManualInstaGuiApp:
 
         # Biến trạng thái
         self.folder_var = tk.StringVar()
-        self.username_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="Chọn folder và nhập links.")
+        self.status_var = tk.StringVar(value="Chọn folder và nhập usernames.")
 
         self._build_ui()
         self._load_config()
@@ -82,30 +93,27 @@ class TASK2ManualInstaGuiApp:
 
         # Khung nhập username
         username_frame = ttk.Frame(self.root, padding=10)
-        username_frame.pack(fill="x")
+        username_frame.pack(fill="both", expand=True)
 
-        ttk.Label(username_frame, text="Username (tùy chọn, để tổ chức thư mục):").pack(
-            anchor="w"
-        )
+        ttk.Label(username_frame, text="Usernames (mỗi dòng một username):").pack(anchor="w")
 
-        username_entry = ttk.Entry(username_frame, textvariable=self.username_var)
-        username_entry.pack(fill="x", pady=(2, 5))
+        self.username_text = tk.Text(username_frame, height=8)
+        self.username_text.pack(fill="both", expand=True, pady=(2, 5))
 
-        # Khung nhập links
-        links_frame = ttk.Frame(self.root, padding=10)
-        links_frame.pack(fill="both", expand=True)
+        # Scrollbar cho username text widget
+        username_scrollbar = ttk.Scrollbar(username_frame, orient="vertical", command=self.username_text.yview)
+        username_scrollbar.pack(side="right", fill="y")
+        self.username_text.config(yscrollcommand=username_scrollbar.set)
 
-        ttk.Label(links_frame, text="Paste các link download vào đây (mỗi dòng một link):").pack(
-            anchor="w"
-        )
+        # Khung nhập số lượt scroll
+        times_frame = ttk.Frame(self.root, padding=10)
+        times_frame.pack(fill="x")
 
-        self.links_text = tk.Text(links_frame, height=15)
-        self.links_text.pack(fill="both", expand=True, pady=(2, 5))
+        ttk.Label(times_frame, text="Số lượt scroll (mặc định: 5):").pack(anchor="w")
 
-        # Scrollbar cho text widget
-        scrollbar = ttk.Scrollbar(links_frame, orient="vertical", command=self.links_text.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.links_text.config(yscrollcommand=scrollbar.set)
+        self.times_var = tk.StringVar(value="5")
+        times_entry = ttk.Entry(times_frame, textvariable=self.times_var, width=10)
+        times_entry.pack(anchor="w", pady=(2, 5))
 
         # Thanh tiến trình + trạng thái
         progress_frame = ttk.Frame(self.root, padding=10)
@@ -126,7 +134,7 @@ class TASK2ManualInstaGuiApp:
 
         self.start_button = ttk.Button(
             button_frame,
-            text="Bắt đầu download",
+            text="Bắt đầu scrape & download",
             command=self.on_start,
         )
         self.start_button.pack(side="right")
@@ -295,8 +303,8 @@ class TASK2ManualInstaGuiApp:
 
     def on_start(self):
         folder = self.folder_var.get().strip()
-        username = self.username_var.get().strip()
-        links_text = self.links_text.get("1.0", "end")
+        usernames_text = self.username_text.get("1.0", "end")
+        times_str = self.times_var.get().strip()
 
         # Validation
         if not folder:
@@ -306,23 +314,25 @@ class TASK2ManualInstaGuiApp:
             messagebox.showerror("Lỗi", "Folder lưu không tồn tại.")
             return
 
-        # Parse links
-        links = self._parse_links_from_text(links_text)
-        if not links:
-            messagebox.showerror("Lỗi", "Không tìm thấy link hợp lệ trong ô text.")
+        # Parse usernames từ text
+        usernames = [u.strip() for u in usernames_text.split('\n') if u.strip()]
+        if not usernames:
+            messagebox.showerror("Lỗi", "Vui lòng nhập ít nhất một username.")
             return
 
-        # Xác định thư mục lưu
-        if username:
-            save_dir = os.path.join(folder, username)
-        else:
-            save_dir = folder
-        os.makedirs(save_dir, exist_ok=True)
+        # Validate times
+        try:
+            times = int(times_str) if times_str else 5
+            if times < 1:
+                times = 5
+        except ValueError:
+            messagebox.showerror("Lỗi", "Số lượt scroll phải là số nguyên dương.")
+            return
 
         # Cài đặt progress bar
         self.progress["value"] = 0
-        self.progress["maximum"] = len(links)
-        self.status_var.set(f"Tìm thấy {len(links)} link(s). Bắt đầu tải...")
+        self.progress["maximum"] = len(usernames)
+        self.status_var.set(f"Chuẩn bị scrape {len(usernames)} username(s)...")
 
         # Disable nút trong khi đang chạy
         self.start_button.config(state="disabled")
@@ -332,28 +342,43 @@ class TASK2ManualInstaGuiApp:
 
         # Chạy trong thread riêng
         thread = threading.Thread(
-            target=self._run_download_thread,
-            args=(links, save_dir),
+            target=self._run_scrape_and_download_multi_thread,
+            args=(folder, usernames, times),
             daemon=True,
         )
         thread.start()
 
-    def _run_download_thread(self, links, save_dir):
+    def _run_scrape_and_download_thread(self, username, save_dir, times=5):
         def progress_callback(idx, total, url, msg):
             # Đảm bảo update UI trên main thread
             self.root.after(
                 0,
                 self._update_progress_ui,
                 idx,
-                len(links),
+                total,
                 url,
                 msg,
             )
 
-        success_count = 0
-        fail_count = 0
-
         try:
+            # Scrape HTML từ web
+            progress_callback(0, 0, "", "Đang scrape HTML từ web...")
+            html_content = scrape_html(username, times=times)
+
+            # Parse links từ HTML
+            links = self._parse_links_from_text(html_content)
+            if not links:
+                progress_callback(0, 0, "", "Không tìm thấy link trong HTML.")
+                return
+
+            # Cập nhật progress bar
+            self.progress["maximum"] = len(links)
+            progress_callback(0, len(links), "", f"Tìm thấy {len(links)} link(s). Bắt đầu tải...")
+
+            success_count = 0
+            fail_count = 0
+
+            # Download từng file
             for idx, link in enumerate(links, start=1):
                 if self._download_link(link, save_dir, idx, progress_callback):
                     success_count += 1
@@ -368,6 +393,114 @@ class TASK2ManualInstaGuiApp:
             result_msg = f"Hoàn thành! Thành công: {success_count}, Thất bại: {fail_count}"
             progress_callback(len(links), len(links), "", result_msg)
 
+        except Exception as e:
+            progress_callback(0, 0, "", f"Lỗi: {e}")
+        finally:
+            self.root.after(0, self._on_download_finished)
+
+    def _run_scrape_and_download_multi_thread(self, folder, usernames, times=5):
+        def progress_callback(idx, total, url, msg):
+            # Đảm bảo update UI trên main thread
+            self.root.after(
+                0,
+                self._update_progress_ui,
+                idx,
+                total,
+                url,
+                msg,
+            )
+
+        try:
+            total_usernames = len(usernames)
+            for user_idx, username in enumerate(usernames, start=1):
+                try:
+                    # Xác định thư mục lưu cho username này
+                    save_dir = os.path.join(folder, username)
+                    os.makedirs(save_dir, exist_ok=True)
+
+                    # Cập nhật status
+                    progress_callback(user_idx - 1, total_usernames, "", f"Scraping {username} ({user_idx}/{total_usernames})...")
+
+                    # Scrape HTML từ web
+                    html_content = scrape_html(username, times=times)
+
+                    # Parse links từ HTML
+                    links = self._parse_links_from_text(html_content)
+                    if not links:
+                        progress_callback(user_idx, total_usernames, "", f"⚠ {username}: Không tìm thấy link")
+                        continue
+
+                    progress_callback(user_idx - 1, total_usernames, "", f"Tìm thấy {len(links)} link cho {username}. Bắt đầu tải...")
+
+                    success_count = 0
+                    fail_count = 0
+
+                    # Download từng file
+                    for idx, link in enumerate(links, start=1):
+                        if self._download_link(link, save_dir, idx):
+                            success_count += 1
+                        else:
+                            fail_count += 1
+
+                    # Tổ chức file
+                    organize_files_by_type(save_dir)
+
+                    # Status cho username này
+                    result_msg = f"✓ {username}: {success_count} thành công, {fail_count} thất bại"
+                    progress_callback(user_idx, total_usernames, "", result_msg)
+
+                except Exception as e:
+                    progress_callback(user_idx, total_usernames, "", f"✗ {username}: Lỗi - {str(e)[:50]}")
+                    continue
+
+        finally:
+            self.root.after(0, self._on_download_finished)
+        def progress_callback(idx, total, url, msg):
+            # Đảm bảo update UI trên main thread
+            self.root.after(
+                0,
+                self._update_progress_ui,
+                idx,
+                total,
+                url,
+                msg,
+            )
+
+        try:
+            # Scrape HTML từ web
+            progress_callback(0, 0, "", "Đang scrape HTML từ web...")
+            html_content = scrape_html(username, times=times)
+
+            # Parse links từ HTML
+            links = self._parse_links_from_text(html_content)
+            if not links:
+                progress_callback(0, 0, "", "Không tìm thấy link trong HTML.")
+                return
+
+            # Cập nhật progress bar
+            self.progress["maximum"] = len(links)
+            progress_callback(0, len(links), "", f"Tìm thấy {len(links)} link(s). Bắt đầu tải...")
+
+            success_count = 0
+            fail_count = 0
+
+            # Download từng file
+            for idx, link in enumerate(links, start=1):
+                if self._download_link(link, save_dir, idx, progress_callback):
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+            # Sau khi download xong, tổ chức file vào images/ và videos/
+            progress_callback(len(links), len(links), "", "Đang tổ chức file...")
+            organize_files_by_type(save_dir)
+
+            # Hiển thị kết quả
+            result_msg = f"Hoàn thành! Thành công: {success_count}, Thất bại: {fail_count}"
+            progress_callback(len(links), len(links), "", result_msg)
+
+        except Exception as e:
+            progress_callback(0, 0, "", f"Lỗi: {e}")
         finally:
             self.root.after(0, self._on_download_finished)
 
@@ -394,16 +527,16 @@ class TASK2ManualInstaGuiApp:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             folder = data.get("folder")
-            username = data.get("username", "")
-            links_text = data.get("links_text", "")
+            usernames_text = data.get("usernames", "")
+            times = data.get("times", "5")
 
             if folder:
                 self.folder_var.set(folder)
-            if username:
-                self.username_var.set(username)
-            if links_text:
-                self.links_text.delete("1.0", "end")
-                self.links_text.insert("1.0", links_text)
+            if usernames_text:
+                self.username_text.delete("1.0", "end")
+                self.username_text.insert("1.0", usernames_text)
+            if times:
+                self.times_var.set(times)
         except Exception as e:  # noqa: BLE001
             messagebox.showwarning(
                 "Cảnh báo",
@@ -412,11 +545,11 @@ class TASK2ManualInstaGuiApp:
 
     def _save_config(self):
         try:
-            links_text = self.links_text.get("1.0", "end")
+            usernames_text = self.username_text.get("1.0", "end")
             data = {
                 "folder": self.folder_var.get().strip(),
-                "username": self.username_var.get().strip(),
-                "links_text": links_text,
+                "usernames": usernames_text,
+                "times": self.times_var.get().strip(),
             }
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
