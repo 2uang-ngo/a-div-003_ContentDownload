@@ -10,6 +10,7 @@ from tkinter import ttk
 
 import requests
 from camoufox.sync_api import Camoufox
+from bs4 import BeautifulSoup
 import time
 
 def organize_files_by_type(user_dir):
@@ -154,50 +155,101 @@ class TASK2ManualInstaGuiApp:
 
     def _parse_links_from_text(self, text):
         """
-        Parse tất cả URLs từ text.
+        Parse tất cả URLs + metadata từ text, chỉ từ bên trong <div class="media-content__info">.
+        Lấy URL và timestamp từ title attribute để tạo tên file.
 
-        :param text: nội dung text từ widget
-        :return: list các URL hợp lệ
+        :param text: nội dung text từ widget (HTML)
+        :return: list các dict {'url': '...', 'filename': '...'}, xử lý trùng lặp tên file
         """
-        # Hỗ trợ cả HTML input: lấy từ href/src, absolute http(s) và protocol-relative (//...)
-        import html as _html
-
         if not text:
             return []
 
-        candidates = []
+        soup = BeautifulSoup(text, 'html.parser')
+        results = []
 
-        # Lấy các giá trị trong href="..." hoặc src='...'
-        attr_pattern = re.compile(r'(?:href|src)=[\"\'](.*?)[\"\']', re.IGNORECASE)
-        candidates.extend(attr_pattern.findall(text))
+        # Tìm tất cả div có class "media-content__info"
+        divs = soup.find_all('div', class_='media-content__info')
 
-        # Lấy các absolute http(s) URLs trong text
-        abs_pattern = re.compile(r'https?://[^\s\"\'<>]+', re.IGNORECASE)
-        candidates.extend(abs_pattern.findall(text))
-
-        # Lấy protocol-relative URLs như //example.com/...
-        proto_pattern = re.compile(r'//[^\s\"\'<>]+')
-        candidates.extend(proto_pattern.findall(text))
-
-        # Normalize, unescape HTML entities, strip trailing punctuation, dedupe preserving order
-        seen = set()
-        unique_urls = []
-        for u in candidates:
-            if not u:
+        for div in divs:
+            # Lấy URL từ div
+            url = self._extract_url_from_content(div)
+            if not url:
                 continue
-            url = _html.unescape(u).strip()
-            if url.startswith('//'):
-                url = 'https:' + url
-            # strip surrounding quotes or trailing punctuation
-            url = url.strip('"\'')
-            url = url.rstrip('.,;:!?)"\'')
-            # only keep http(s) URLs
-            if url.lower().startswith('http://') or url.lower().startswith('https://'):
-                if url not in seen:
-                    seen.add(url)
-                    unique_urls.append(url)
 
-        return unique_urls
+            # Lấy timestamp từ <p class="media-content__meta-time" title="...">
+            timestamp = self._extract_timestamp_from_content(div)
+            
+            # Chuyển timestamp thành tên file hợp lệ
+            filename = self._timestamp_to_filename(timestamp)
+
+            results.append({
+                'url': url,
+                'filename': filename,
+                'timestamp': timestamp
+            })
+
+        # Xử lý trùng lặp tên file: đánh số thứ tự ở cuối
+        filename_count = {}
+        for item in results:
+            filename = item['filename']
+            if filename in filename_count:
+                filename_count[filename] += 1
+                base, ext = os.path.splitext(filename)
+                item['filename'] = f"{base}_{filename_count[filename]}{ext}"
+            else:
+                filename_count[filename] = 1
+
+        return results
+
+    def _extract_url_from_content(self, div_element):
+        """Trích xuất URL từ BeautifulSoup div element."""
+        import html as _html
+
+        # Tìm tất cả thẻ a, img, video, source...
+        for tag in div_element.find_all(['a', 'img', 'video', 'source']):
+            url = tag.get('href') or tag.get('src') or tag.get('data-src')
+            if url:
+                url = _html.unescape(str(url)).strip()
+                if url.startswith('//'):
+                    url = 'https:' + url
+                url = url.strip('"\'')
+                url = url.rstrip('.,;:!?)"\'')
+                if url.lower().startswith('http://') or url.lower().startswith('https://'):
+                    return url
+
+        return None
+
+    def _extract_timestamp_from_content(self, div_element):
+        """Trích xuất timestamp từ title attribute của <p class="media-content__meta-time">."""
+        p_tag = div_element.find('p', class_='media-content__meta-time')
+        if p_tag:
+            return p_tag.get('title')
+        return None
+
+    def _timestamp_to_filename(self, timestamp):
+        """
+        Chuyển timestamp thành tên file hợp lệ.
+        Ví dụ: "7/6/2025, 8:46:19 AM" -> "2025-07-06_08-46-19"
+        """
+        if not timestamp:
+            return "file.bin"
+
+        try:
+            # Thử parse timestamp (ví dụ: "7/6/2025, 8:46:19 AM")
+            from datetime import datetime
+            # Thử các format khác nhau
+            for fmt in ["%m/%d/%Y, %I:%M:%S %p", "%d/%m/%Y, %H:%M:%S", "%Y-%m-%d, %H:%M:%S"]:
+                try:
+                    dt = datetime.strptime(timestamp.strip(), fmt)
+                    return dt.strftime("%Y-%m-%d_%H-%M-%S.bin")
+                except ValueError:
+                    continue
+            
+            # Nếu không parse được, dùng timestamp trực tiếp, loại bỏ ký tự không hợp lệ
+            filename = re.sub(r'[<>:"/\\|?*]', '_', timestamp)
+            return filename + ".bin"
+        except Exception:
+            return "file.bin"
 
     def _get_filename_from_url(self, url, index):
         """
@@ -233,13 +285,14 @@ class TASK2ManualInstaGuiApp:
         # Thử đoán extension từ Content-Type hoặc dùng .bin
         return f"file_{index}.bin"
 
-    def _download_link(self, url, save_dir, index, progress_callback=None):
+    def _download_link(self, url, save_dir, filename_base=None, index=None, progress_callback=None):
         """
         Download một link cụ thể.
 
         :param url: URL cần download
         :param save_dir: thư mục lưu file
-        :param index: số thứ tự (để đặt tên file)
+        :param filename_base: tên file cơ bản (không có extension)
+        :param index: số thứ tự (dùng khi không có filename_base)
         :param progress_callback: hàm callback (index, total, url, status_msg)
         :return: True nếu thành công, False nếu thất bại
         """
@@ -257,19 +310,23 @@ class TASK2ManualInstaGuiApp:
             response.raise_for_status()
 
             # Lấy filename
-            filename = self._get_filename_from_url(url, index)
+            if filename_base:
+                filename = filename_base
+            else:
+                filename = self._get_filename_from_url(url, index)
 
             # Nếu không có extension, thử đoán từ Content-Type
             if "." not in filename or filename.endswith(".bin"):
                 content_type = response.headers.get("Content-Type", "")
+                base, ext = os.path.splitext(filename)
                 if "image/jpeg" in content_type or "image/jpg" in content_type:
-                    filename = filename.replace(".bin", ".jpg") if filename.endswith(".bin") else f"file_{index}.jpg"
+                    filename = f"{base}.jpg"
                 elif "image/png" in content_type:
-                    filename = filename.replace(".bin", ".png") if filename.endswith(".bin") else f"file_{index}.png"
+                    filename = f"{base}.png"
                 elif "video/mp4" in content_type:
-                    filename = filename.replace(".bin", ".mp4") if filename.endswith(".bin") else f"file_{index}.mp4"
+                    filename = f"{base}.mp4"
                 elif "image/gif" in content_type:
-                    filename = filename.replace(".bin", ".gif") if filename.endswith(".bin") else f"file_{index}.gif"
+                    filename = f"{base}.gif"
 
             # Đảm bảo filename không có ký tự không hợp lệ
             filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
@@ -348,56 +405,6 @@ class TASK2ManualInstaGuiApp:
         )
         thread.start()
 
-    def _run_scrape_and_download_thread(self, username, save_dir, times=5):
-        def progress_callback(idx, total, url, msg):
-            # Đảm bảo update UI trên main thread
-            self.root.after(
-                0,
-                self._update_progress_ui,
-                idx,
-                total,
-                url,
-                msg,
-            )
-
-        try:
-            # Scrape HTML từ web
-            progress_callback(0, 0, "", "Đang scrape HTML từ web...")
-            html_content = scrape_html(username, times=times)
-
-            # Parse links từ HTML
-            links = self._parse_links_from_text(html_content)
-            if not links:
-                progress_callback(0, 0, "", "Không tìm thấy link trong HTML.")
-                return
-
-            # Cập nhật progress bar
-            self.progress["maximum"] = len(links)
-            progress_callback(0, len(links), "", f"Tìm thấy {len(links)} link(s). Bắt đầu tải...")
-
-            success_count = 0
-            fail_count = 0
-
-            # Download từng file
-            for idx, link in enumerate(links, start=1):
-                if self._download_link(link, save_dir, idx, progress_callback):
-                    success_count += 1
-                else:
-                    fail_count += 1
-
-            # Sau khi download xong, tổ chức file vào images/ và videos/
-            progress_callback(len(links), len(links), "", "Đang tổ chức file...")
-            organize_files_by_type(save_dir)
-
-            # Hiển thị kết quả
-            result_msg = f"Hoàn thành! Thành công: {success_count}, Thất bại: {fail_count}"
-            progress_callback(len(links), len(links), "", result_msg)
-
-        except Exception as e:
-            progress_callback(0, 0, "", f"Lỗi: {e}")
-        finally:
-            self.root.after(0, self._on_download_finished)
-
     def _run_scrape_and_download_multi_thread(self, folder, usernames, times=5):
         def progress_callback(idx, total, url, msg):
             # Đảm bảo update UI trên main thread
@@ -424,20 +431,22 @@ class TASK2ManualInstaGuiApp:
                     # Scrape HTML từ web
                     html_content = scrape_html(username, times=times)
 
-                    # Parse links từ HTML
-                    links = self._parse_links_from_text(html_content)
-                    if not links:
+                    # Parse links từ HTML (trả về list các dict với url và filename)
+                    links_data = self._parse_links_from_text(html_content)
+                    if not links_data:
                         progress_callback(user_idx, total_usernames, "", f"⚠ {username}: Không tìm thấy link")
                         continue
 
-                    progress_callback(user_idx - 1, total_usernames, "", f"Tìm thấy {len(links)} link cho {username}. Bắt đầu tải...")
+                    progress_callback(user_idx - 1, total_usernames, "", f"Tìm thấy {len(links_data)} link cho {username}. Bắt đầu tải...")
 
                     success_count = 0
                     fail_count = 0
 
                     # Download từng file
-                    for idx, link in enumerate(links, start=1):
-                        if self._download_link(link, save_dir, idx):
+                    for idx, link_data in enumerate(links_data, start=1):
+                        url = link_data['url']
+                        filename = link_data['filename']
+                        if self._download_link(url, save_dir, filename_base=filename, index=idx, progress_callback=lambda i, t, u, m: progress_callback(i or idx, None, u, m)):
                             success_count += 1
                         else:
                             fail_count += 1
@@ -451,58 +460,13 @@ class TASK2ManualInstaGuiApp:
 
                 except Exception as e:
                     progress_callback(user_idx, total_usernames, "", f"✗ {username}: Lỗi - {str(e)[:50]}")
+                    organize_files_by_type(save_dir)
                     continue
 
         finally:
             self.root.after(0, self._on_download_finished)
-        def progress_callback(idx, total, url, msg):
-            # Đảm bảo update UI trên main thread
-            self.root.after(
-                0,
-                self._update_progress_ui,
-                idx,
-                total,
-                url,
-                msg,
-            )
-
-        try:
-            # Scrape HTML từ web
-            progress_callback(0, 0, "", "Đang scrape HTML từ web...")
-            html_content = scrape_html(username, times=times)
-
-            # Parse links từ HTML
-            links = self._parse_links_from_text(html_content)
-            if not links:
-                progress_callback(0, 0, "", "Không tìm thấy link trong HTML.")
-                return
-
-            # Cập nhật progress bar
-            self.progress["maximum"] = len(links)
-            progress_callback(0, len(links), "", f"Tìm thấy {len(links)} link(s). Bắt đầu tải...")
-
-            success_count = 0
-            fail_count = 0
-
-            # Download từng file
-            for idx, link in enumerate(links, start=1):
-                if self._download_link(link, save_dir, idx, progress_callback):
-                    success_count += 1
-                else:
-                    fail_count += 1
-
-            # Sau khi download xong, tổ chức file vào images/ và videos/
-            progress_callback(len(links), len(links), "", "Đang tổ chức file...")
-            organize_files_by_type(save_dir)
-
-            # Hiển thị kết quả
-            result_msg = f"Hoàn thành! Thành công: {success_count}, Thất bại: {fail_count}"
-            progress_callback(len(links), len(links), "", result_msg)
-
-        except Exception as e:
-            progress_callback(0, 0, "", f"Lỗi: {e}")
-        finally:
-            self.root.after(0, self._on_download_finished)
+        
+        
 
     def _update_progress_ui(self, idx, total, url, msg):
         self.progress["value"] = idx
