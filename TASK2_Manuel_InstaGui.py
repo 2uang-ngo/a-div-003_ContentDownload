@@ -49,10 +49,13 @@ def scrape_html(username, times=5):
         page.goto("https://gramsnap.com/en/")
         page.get_by_role("textbox", name="@username or link").fill(username)
         page.get_by_role("button", name="Search").click()
+        time.sleep(1)
         for _ in range(times):
             page.keyboard.press('End')
             page.evaluate("window.scrollBy(0, -1000)")
-            time.sleep(2)
+            
+            page.wait_for_load_state("networkidle")
+            time.sleep(1)
 
         return page.locator("ul.profile-media-list").inner_html()
 class TASK2ManualInstaGuiApp:
