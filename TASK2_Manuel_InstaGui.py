@@ -4,6 +4,7 @@ import re
 import shutil
 import threading
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -36,12 +37,10 @@ def organize_files_by_type(user_dir):
             _, ext = os.path.splitext(filename.lower())
             if ext in image_extensions:
                 dest_path = os.path.join(images_dir, filename)
-                if not os.path.exists(dest_path):  # Tránh overwrite nếu đã tồn tại
-                    shutil.move(file_path, dest_path)
+                shutil.move(file_path, dest_path)
             elif ext in video_extensions:
                 dest_path = os.path.join(videos_dir, filename)
-                if not os.path.exists(dest_path):
-                    shutil.move(file_path, dest_path)
+                shutil.move(file_path, dest_path)
 
 def scrape_html(username, times=5):
     with Camoufox() as browser:
@@ -50,12 +49,15 @@ def scrape_html(username, times=5):
         page.get_by_role("textbox", name="@username or link").fill(username)
         page.get_by_role("button", name="Search").click()
         time.sleep(1)
+        page.wait_for_load_state("load")
+        time.sleep(1)
         for _ in range(times):
             page.keyboard.press('End')
             page.evaluate("window.scrollBy(0, -1000)")
             
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("load")
             time.sleep(1)
+        time.sleep(5)
 
         return page.locator("ul.profile-media-list").inner_html()
 class TASK2ManualInstaGuiApp:
@@ -288,6 +290,20 @@ class TASK2ManualInstaGuiApp:
         # Thử đoán extension từ Content-Type hoặc dùng .bin
         return f"file_{index}.bin"
 
+    def _write_log(self, log_path, message):
+        """
+        Ghi log vào file.
+
+        :param log_path: đường dẫn file log
+        :param message: nội dung message cần ghi
+        """
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{timestamp}] {message}\n")
+        except Exception as e:
+            print(f"Lỗi ghi log: {e}")
+
     def _download_link(self, url, save_dir, filename_base=None, index=None, progress_callback=None):
         """
         Download một link cụ thể.
@@ -409,16 +425,23 @@ class TASK2ManualInstaGuiApp:
         thread.start()
 
     def _run_scrape_and_download_multi_thread(self, folder, usernames, times=5):
-        def progress_callback(idx, total, url, msg):
-            # Đảm bảo update UI trên main thread
+        def scrape_progress_callback(idx, total, msg):
+            # Callback chỉ update progress bar khi scrape
             self.root.after(
                 0,
                 self._update_progress_ui,
                 idx,
                 total,
-                url,
+                "",
                 msg,
             )
+
+        # Tạo file log
+        log_path = os.path.join(folder, "log.txt")
+        # Ghi header log
+        self._write_log(log_path, "="*50)
+        self._write_log(log_path, f"Bắt đầu scrape lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._write_log(log_path, "="*50)
 
         try:
             total_usernames = len(usernames)
@@ -428,8 +451,8 @@ class TASK2ManualInstaGuiApp:
                     save_dir = os.path.join(folder, username)
                     os.makedirs(save_dir, exist_ok=True)
 
-                    # Cập nhật status
-                    progress_callback(user_idx - 1, total_usernames, "", f"Scraping {username} ({user_idx}/{total_usernames})...")
+                    # Cập nhật status - scraping
+                    scrape_progress_callback(user_idx - 1, total_usernames, f"Scraping {username} ({user_idx}/{total_usernames})...")
 
                     # Scrape HTML từ web
                     html_content = scrape_html(username, times=times)
@@ -437,19 +460,21 @@ class TASK2ManualInstaGuiApp:
                     # Parse links từ HTML (trả về list các dict với url và filename)
                     links_data = self._parse_links_from_text(html_content)
                     if not links_data:
-                        progress_callback(user_idx, total_usernames, "", f"⚠ {username}: Không tìm thấy link")
+                        msg = f"⚠ {username}: Không tìm thấy link"
+                        self._write_log(log_path, f"❌ {username}: Không tìm thấy link (0 file)")
+                        scrape_progress_callback(user_idx, total_usernames, msg)
                         continue
 
-                    progress_callback(user_idx - 1, total_usernames, "", f"Tìm thấy {len(links_data)} link cho {username}. Bắt đầu tải...")
+                    scrape_progress_callback(user_idx - 1, total_usernames, f"Tìm thấy {len(links_data)} link cho {username}. Bắt đầu tải...")
 
                     success_count = 0
                     fail_count = 0
 
-                    # Download từng file
+                    # Download từng file (không update progress bar)
                     for idx, link_data in enumerate(links_data, start=1):
                         url = link_data['url']
                         filename = link_data['filename']
-                        if self._download_link(url, save_dir, filename_base=filename, index=idx, progress_callback=lambda i, t, u, m: progress_callback(i or idx, None, u, m)):
+                        if self._download_link(url, save_dir, filename_base=filename, index=idx, progress_callback=None):
                             success_count += 1
                         else:
                             fail_count += 1
@@ -457,19 +482,27 @@ class TASK2ManualInstaGuiApp:
                     # Tổ chức file
                     organize_files_by_type(save_dir)
 
-                    # Status cho username này
+                    # Status cho username này - cập nhật progress bar
                     result_msg = f"✓ {username}: {success_count} thành công, {fail_count} thất bại"
-                    progress_callback(user_idx, total_usernames, "", result_msg)
+                    scrape_progress_callback(user_idx, total_usernames, result_msg)
+                    
+                    # Ghi log cho username này
+                    self._write_log(log_path, f"✓ {username}: {success_count} file tải thành công, {fail_count} file thất bại")
 
                 except Exception as e:
-                    progress_callback(user_idx, total_usernames, "", f"✗ {username}: Lỗi - {str(e)[:50]}")
+                    error_msg = f"✗ {username}: Lỗi - {str(e)[:50]}"
+                    scrape_progress_callback(user_idx, total_usernames, error_msg)
+                    # Ghi log lỗi
+                    self._write_log(log_path, f"✗ {username}: Lỗi - {str(e)}")
                     organize_files_by_type(save_dir)
                     continue
 
         finally:
+            # Ghi footer log
+            self._write_log(log_path, "="*50)
+            self._write_log(log_path, f"Kết thúc lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self._write_log(log_path, "="*50)
             self.root.after(0, self._on_download_finished)
-        
-        
 
     def _update_progress_ui(self, idx, total, url, msg):
         self.progress["value"] = idx
@@ -539,4 +572,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
