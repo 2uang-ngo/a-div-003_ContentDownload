@@ -53,6 +53,8 @@ def scrape_html(username, times=5):
         time.sleep(1)
         for _ in range(times):
             page.keyboard.press('End')
+            page.wait_for_load_state("load")
+            time.sleep(1)
             page.evaluate("window.scrollBy(0, -1000)")
             
             page.wait_for_load_state("load")
@@ -65,7 +67,7 @@ class TASK2ManualInstaGuiApp:
         self.root = root
         self.root.title("TASK2 Manual Instagram Downloader")
         self.root.geometry("700x600")
-        self.config_path = os.path.join(os.path.dirname(__file__), "TASK2_config.json")
+        self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
 
         # Biến trạng thái
         self.folder_var = tk.StringVar()
@@ -387,8 +389,8 @@ class TASK2ManualInstaGuiApp:
             messagebox.showerror("Lỗi", "Vui lòng chọn folder lưu.")
             return
         if not os.path.isdir(folder):
-            messagebox.showerror("Lỗi", "Folder lưu không tồn tại.")
-            return
+            messagebox.showinfo("Info", "Folder lưu không tồn tại. Tự động tạo Folder")
+            os.makedirs(folder, exist_ok=True)
 
         # Parse usernames từ text
         usernames = [u.strip() for u in usernames_text.split('\n') if u.strip()]

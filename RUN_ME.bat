@@ -19,14 +19,14 @@ REM File bat de chay TASK2 workflow
 @REM )
 
 
-REM Buoc 5: Chay script TASK2_Manuel_InstaGui.py
-echo Dang chay script TASK2_Manuel_InstaGui.py...
+REM Buoc 5: Chay script Auto_Insta_Downloader.py
+echo Dang chay script Auto_Insta_Downloader.py...
 call "venv\Scripts\activate.bat"
-python TASK2_Manuel_InstaGui.py
+python Auto_Insta_Downloader.py
 
 REM Kiem tra loi khi chay Python
 if errorlevel 1 (
-    echo Co loi xay ra khi chay TASK2_Manuel_InstaGui.py
+    echo Co loi xay ra khi chay Auto_Insta_Downloader.py
     pause
     exit /b 1
 )
