@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import threading
+import sqlite3
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 import tkinter as tk
@@ -62,12 +63,167 @@ def scrape_html(username, times=5):
         time.sleep(5)
 
         return page.locator("ul.profile-media-list").inner_html()
+    
+
+# ==================== DATABASE FUNCTIONS ====================
+
+class DownloadDatabase:
+    """Quản lý SQLite database cho tracking downloads."""
+    
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Tạo database và bảng nếu chưa tồn tại."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Tạo bảng downloads
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    timestamp TEXT,
+                    file_path TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            conn.commit()
+            # Tạo index UNIQUE trên file_path để dùng file_path làm khóa trùng lặp
+            try:
+                cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS ux_downloads_file_path ON downloads(file_path)')
+                conn.commit()
+            except sqlite3.Error:
+                # Nếu không thể tạo index (ví dụ do dữ liệu trùng lặp cũ), bỏ qua nhưng log
+                print("Cảnh báo: Không thể tạo unique index trên file_path - có thể có các giá trị trùng lặp cũ.")
+            conn.close()
+        except sqlite3.Error as e:
+            print(f"Lỗi tạo database: {e}")
+    
+    def insert_or_ignore(self, username, url, timestamp, file_path):
+        """INSERT OR IGNORE một bản ghi vào DB với status=pending.
+
+        Sử dụng `file_path` (relative path) làm khóa để kiểm tra trùng lặp.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR IGNORE INTO downloads 
+                (username, url, timestamp, file_path, status)
+                VALUES (?, ?, ?, ?, 'pending')
+            ''', (username, url, timestamp, file_path))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.Error as e:
+            print(f"Lỗi insert: {e}")
+            return False
+    
+    def get_pending_downloads(self, limit=None):
+        """Lấy tất cả downloads với status=pending."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            if limit:
+                cursor.execute('''
+                    SELECT id, username, url, timestamp, file_path FROM downloads 
+                    WHERE status = 'pending'
+                    LIMIT ?
+                ''', (limit,))
+            else:
+                cursor.execute('''
+                    SELECT id, username, url, timestamp, file_path FROM downloads 
+                    WHERE status = 'pending'
+                ''')
+            
+            results = cursor.fetchall()
+            conn.close()
+            return results
+        except sqlite3.Error as e:
+            print(f"Lỗi query: {e}")
+            return []
+    
+    def update_download_status(self, download_id, status, file_path=None):
+        """Update status và file_path của một download."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            if file_path:
+                cursor.execute('''
+                    UPDATE downloads 
+                    SET status = ?, file_path = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (status, file_path, download_id))
+            else:
+                cursor.execute('''
+                    UPDATE downloads 
+                    SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (status, download_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.Error as e:
+            print(f"Lỗi update: {e}")
+            return False
+    
+    def get_download_by_id(self, download_id):
+        """Lấy thông tin một download theo ID."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT * FROM downloads WHERE id = ?', (download_id,))
+            result = cursor.fetchone()
+            conn.close()
+            return result
+        except sqlite3.Error as e:
+            print(f"Lỗi query: {e}")
+            return None
+    
+    def get_stats(self):
+        """Lấy số liệu thống kê: total, pending, ready."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM downloads')
+            total = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM downloads WHERE status = 'pending'")
+            pending = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM downloads WHERE status = 'ready'")
+            ready = cursor.fetchone()[0]
+            
+            conn.close()
+            return {'total': total, 'pending': pending, 'ready': ready}
+        except sqlite3.Error as e:
+            print(f"Lỗi query stats: {e}")
+            return {'total': 0, 'pending': 0, 'ready': 0}
+
 class TASK2ManualInstaGuiApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("TASK2 Manual Instagram Downloader")
         self.root.geometry("700x600")
         self.config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        self.db = None
+        self.db_path = None
 
         # Biến trạng thái
         self.folder_var = tk.StringVar()
@@ -142,10 +298,19 @@ class TASK2ManualInstaGuiApp:
 
         self.start_button = ttk.Button(
             button_frame,
-            text="Bắt đầu scrape & download",
+            text="Bắt đầu scrape & insert DB",
             command=self.on_start,
         )
         self.start_button.pack(side="right")
+
+        # Nút tải file từ DB (worker)
+        self.worker_button = ttk.Button(
+            button_frame,
+            text="Tải file từ DB",
+            command=self.on_start_worker,
+            state="disabled",
+        )
+        self.worker_button.pack(side="right", padx=(0, 8))
 
         # Nút lưu config
         save_btn = ttk.Button(
@@ -315,7 +480,7 @@ class TASK2ManualInstaGuiApp:
         :param filename_base: tên file cơ bản (không có extension)
         :param index: số thứ tự (dùng khi không có filename_base)
         :param progress_callback: hàm callback (index, total, url, status_msg)
-        :return: True nếu thành công, False nếu thất bại
+        :return: saved absolute file path as string nếu thành công, None nếu thất bại
         """
         try:
             # Headers giả lập browser
@@ -372,12 +537,13 @@ class TASK2ManualInstaGuiApp:
             if progress_callback:
                 progress_callback(index, None, url, f"Đã tải: {os.path.basename(file_path)}")
 
-            return True
+            # Trả về đường dẫn file đã lưu (absolute path) để caller có thể cập nhật DB chính xác
+            return file_path
 
         except Exception as e:  # noqa: BLE001
             if progress_callback:
                 progress_callback(index, None, url, f"Lỗi: {e}")
-            return False
+            return None
 
     def on_start(self):
         folder = self.folder_var.get().strip()
@@ -420,15 +586,46 @@ class TASK2ManualInstaGuiApp:
 
         # Chạy trong thread riêng
         thread = threading.Thread(
-            target=self._run_scrape_and_download_multi_thread,
+            target=self._run_scrape_only_multi_thread,
             args=(folder, usernames, times),
             daemon=True,
         )
         thread.start()
 
-    def _run_scrape_and_download_multi_thread(self, folder, usernames, times=5):
+    def on_start_worker(self):
+        """Bắt đầu worker download từ các pending items trong DB."""
+        if not self.db_path or not os.path.isfile(self.db_path):
+            messagebox.showerror("Lỗi", "Không tìm thấy database. Vui lòng scrape trước.")
+            return
+        
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Lỗi", "Folder lưu không hợp lệ.")
+            return
+        
+        # Cập nhật progress bar
+        self.progress["value"] = 0
+        self.status_var.set("Chuẩn bị tải file từ database...")
+        
+        # Disable nút trong khi đang chạy
+        self.worker_button.config(state="disabled")
+        self.start_button.config(state="disabled")
+        
+        # Chạy trong thread riêng
+        thread = threading.Thread(
+            target=self._run_download_worker_thread,
+            args=(folder,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_scrape_only_multi_thread(self, folder, usernames, times=5):
+        """Chỉ scrape và insert vào DB, không download file."""
+        # Khởi tạo database
+        self.db_path = os.path.join(folder, "downloads.db")
+        self.db = DownloadDatabase(self.db_path)
+        
         def scrape_progress_callback(idx, total, msg):
-            # Callback chỉ update progress bar khi scrape
             self.root.after(
                 0,
                 self._update_progress_ui,
@@ -440,7 +637,6 @@ class TASK2ManualInstaGuiApp:
 
         # Tạo file log
         log_path = os.path.join(folder, "log.txt")
-        # Ghi header log
         self._write_log(log_path, "="*50)
         self._write_log(log_path, f"Bắt đầu scrape lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self._write_log(log_path, "="*50)
@@ -454,12 +650,16 @@ class TASK2ManualInstaGuiApp:
                     os.makedirs(save_dir, exist_ok=True)
 
                     # Cập nhật status - scraping
-                    scrape_progress_callback(user_idx - 1, total_usernames, f"Scraping {username} ({user_idx}/{total_usernames})...")
+                    scrape_progress_callback(
+                        user_idx - 1, 
+                        total_usernames, 
+                        f"Scraping {username} ({user_idx}/{total_usernames})..."
+                    )
 
                     # Scrape HTML từ web
                     html_content = scrape_html(username, times=times)
 
-                    # Parse links từ HTML (trả về list các dict với url và filename)
+                    # Parse links từ HTML
                     links_data = self._parse_links_from_text(html_content)
                     if not links_data:
                         msg = f"⚠ {username}: Không tìm thấy link"
@@ -467,44 +667,149 @@ class TASK2ManualInstaGuiApp:
                         scrape_progress_callback(user_idx, total_usernames, msg)
                         continue
 
-                    scrape_progress_callback(user_idx - 1, total_usernames, f"Tìm thấy {len(links_data)} link cho {username}. Bắt đầu tải...")
-
-                    success_count = 0
-                    fail_count = 0
-
-                    # Download từng file (không update progress bar)
-                    for idx, link_data in enumerate(links_data, start=1):
+                    # INSERT vào database (sử dụng file_path làm khóa trùng lặp)
+                    insert_count = 0
+                    skip_count = 0
+                    for link_data in links_data:
                         url = link_data['url']
-                        filename = link_data['filename']
-                        if self._download_link(url, save_dir, filename_base=filename, index=idx, progress_callback=None):
-                            success_count += 1
+                        timestamp = link_data['timestamp']
+
+                        # Sinh tên file từ timestamp và tạo file_path tương đối theo username
+                        filename = self._timestamp_to_filename(timestamp)
+                        file_path = os.path.join(username, filename)
+
+                        if self.db.insert_or_ignore(username, url, timestamp, file_path):
+                            insert_count += 1
                         else:
-                            fail_count += 1
+                            skip_count += 1
 
-                    # Tổ chức file
-                    organize_files_by_type(save_dir)
-
-                    # Status cho username này - cập nhật progress bar
-                    result_msg = f"✓ {username}: {success_count} thành công, {fail_count} thất bại"
+                    result_msg = f"✓ {username}: {insert_count} insert, {skip_count} skip (trùng lặp)"
                     scrape_progress_callback(user_idx, total_usernames, result_msg)
-                    
-                    # Ghi log cho username này
-                    self._write_log(log_path, f"✓ {username}: {success_count} file tải thành công, {fail_count} file thất bại")
+                    self._write_log(log_path, f"✓ {username}: {insert_count} insert, {skip_count} skip")
 
                 except Exception as e:
                     error_msg = f"✗ {username}: Lỗi - {str(e)[:50]}"
                     scrape_progress_callback(user_idx, total_usernames, error_msg)
-                    # Ghi log lỗi
                     self._write_log(log_path, f"✗ {username}: Lỗi - {str(e)}")
-                    organize_files_by_type(save_dir)
                     continue
 
         finally:
-            # Ghi footer log
+            # Ghi thống kê vào log
+            stats = self.db.get_stats()
+            self._write_log(log_path, f"Thống kê DB: Total={stats['total']}, Pending={stats['pending']}, Ready={stats['ready']}")
             self._write_log(log_path, "="*50)
             self._write_log(log_path, f"Kết thúc lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             self._write_log(log_path, "="*50)
-            self.root.after(0, self._on_download_finished)
+            self.root.after(0, self._on_scrape_finished)
+
+    def _run_download_worker_thread(self, folder):
+        """Worker thread để download tất cả pending items từ database."""
+        if not self.db:
+            self.db = DownloadDatabase(self.db_path)
+        
+        log_path = os.path.join(folder, "log.txt")
+        self._write_log(log_path, "="*50)
+        self._write_log(log_path, f"Bắt đầu worker download lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._write_log(log_path, "="*50)
+
+        try:
+            pending = self.db.get_pending_downloads()
+            if not pending:
+                self.root.after(0, lambda: messagebox.showinfo("Info", "Không có file pending để tải."))
+                return
+            
+            total = len(pending)
+            self.progress["maximum"] = total
+            
+            success_count = 0
+            fail_count = 0
+            
+            for idx, row in enumerate(pending, start=1):
+                try:
+                    # Support sqlite3.Row or tuple
+                    download_id = row['id'] if hasattr(row, 'keys') else row[0]
+                    username = row['username'] if hasattr(row, 'keys') else row[1]
+                    url = row['url'] if hasattr(row, 'keys') else row[2]
+                    timestamp = row['timestamp'] if hasattr(row, 'keys') else row[3]
+                    orig_file_path = row['file_path'] if hasattr(row, 'keys') else (row[4] if len(row) > 4 else None)
+                    
+                    # Tạo thư mục nếu cần
+                    save_dir = os.path.join(folder, username)
+                    os.makedirs(save_dir, exist_ok=True)
+                    
+                    # Use the filename previously generated during scrape as filename_base
+                    if orig_file_path:
+                        filename_base = os.path.basename(orig_file_path)
+                    else:
+                        filename_base = self._timestamp_to_filename(timestamp)
+                    
+                    # Update progress
+                    self.root.after(
+                        0,
+                        self._update_progress_ui,
+                        idx,
+                        total,
+                        url[:50] + "...",
+                        f"Tải ({idx}/{total}): {username}"
+                    )
+                    
+                    # Download file (returns absolute saved path or None)
+                    saved_abspath = self._download_link(url, save_dir, filename_base=filename_base, index=idx)
+                    if saved_abspath:
+                        # Xác định thư mục đích theo loại file (images/videos)
+                        _, ext = os.path.splitext(saved_abspath)
+                        ext = ext.lower()
+                        image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+                        video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
+
+                        if ext in image_extensions:
+                            dest_dir = os.path.join(folder, username, "images")
+                        elif ext in video_extensions:
+                            dest_dir = os.path.join(folder, username, "videos")
+                        else:
+                            dest_dir = os.path.join(folder, username)
+
+                        os.makedirs(dest_dir, exist_ok=True)
+                        dest_path = os.path.join(dest_dir, os.path.basename(saved_abspath))
+
+                        # Move file to destination if needed
+                        try:
+                            if os.path.abspath(saved_abspath) != os.path.abspath(dest_path):
+                                shutil.move(saved_abspath, dest_path)
+                        except Exception as e:
+                            # Nếu không thể move, log và tiếp tục với đường dẫn gốc
+                            self._write_log(log_path, f"⚠ ID={download_id}, {username}: Không thể di chuyển file: {e}")
+                            dest_path = saved_abspath
+
+                        # Lưu relative path so với base folder trong DB
+                        rel_path = os.path.relpath(dest_path, folder)
+                        self.db.update_download_status(download_id, 'ready', rel_path)
+                        success_count += 1
+                        self._write_log(log_path, f"✓ ID={download_id}, {username}: {rel_path}")
+                    else:
+                        fail_count += 1
+                        self._write_log(log_path, f"✗ ID={download_id}, {username}: Lỗi tải")
+                    
+                except Exception as e:
+                    fail_count += 1
+                    self._write_log(log_path, f"✗ Exception: {str(e)}")
+                    continue
+            
+            # Tổ chức file
+            for username in set(row[1] for row in pending):
+                user_dir = os.path.join(folder, username)
+                if os.path.exists(user_dir):
+                    organize_files_by_type(user_dir)
+            
+            stats = self.db.get_stats()
+            self._write_log(log_path, f"Kết quả: {success_count} thành công, {fail_count} thất bại")
+            self._write_log(log_path, f"Thống kê DB: Total={stats['total']}, Pending={stats['pending']}, Ready={stats['ready']}")
+            
+        finally:
+            self._write_log(log_path, "="*50)
+            self._write_log(log_path, f"Kết thúc lúc: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self._write_log(log_path, "="*50)
+            self.root.after(0, self._on_worker_finished)
 
     def _update_progress_ui(self, idx, total, url, msg):
         self.progress["value"] = idx
@@ -518,6 +823,22 @@ class TASK2ManualInstaGuiApp:
     def _on_download_finished(self):
         self.start_button.config(state="normal")
         messagebox.showinfo("Hoàn thành", "Quá trình tải đã kết thúc.")
+
+    def _on_scrape_finished(self):
+        """Callback khi scrape xong."""
+        self.start_button.config(state="normal")
+        self.worker_button.config(state="normal")
+        stats = self.db.get_stats() if self.db else {}
+        msg = f"Scrape hoàn thành!\n\nDB Stats:\nTotal: {stats.get('total', 0)}\nPending: {stats.get('pending', 0)}\nReady: {stats.get('ready', 0)}\n\nBấm nút 'Tải file từ DB' để tải file."
+        messagebox.showinfo("Hoàn thành", msg)
+
+    def _on_worker_finished(self):
+        """Callback khi worker download xong."""
+        self.worker_button.config(state="normal")
+        self.start_button.config(state="normal")
+        stats = self.db.get_stats() if self.db else {}
+        msg = f"Download hoàn thành!\n\nDB Stats:\nTotal: {stats.get('total', 0)}\nPending: {stats.get('pending', 0)}\nReady: {stats.get('ready', 0)}"
+        messagebox.showinfo("Hoàn thành", msg)
 
     # -------------------------------------------------
     # Config helpers
