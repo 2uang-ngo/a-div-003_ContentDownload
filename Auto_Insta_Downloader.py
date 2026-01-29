@@ -15,33 +15,9 @@ from camoufox.sync_api import Camoufox
 from bs4 import BeautifulSoup
 import time
 
-def organize_files_by_type(user_dir):
-    """
-    Di chuyển file ảnh vào images/ và file video vào videos/ trong thư mục user.
-
-    :param user_dir: đường dẫn thư mục user
-    """
-    images_dir = os.path.join(user_dir, "images")
-    videos_dir = os.path.join(user_dir, "videos")
-    os.makedirs(images_dir, exist_ok=True)
-    os.makedirs(videos_dir, exist_ok=True)
-
-    # Các extension ảnh phổ biến
-    image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
-    # Các extension video phổ biến
-    video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
-
-    # Duyệt tất cả file trong user_dir (không vào subfolder)
-    for filename in os.listdir(user_dir):
-        file_path = os.path.join(user_dir, filename)
-        if os.path.isfile(file_path):
-            _, ext = os.path.splitext(filename.lower())
-            if ext in image_extensions:
-                dest_path = os.path.join(images_dir, filename)
-                shutil.move(file_path, dest_path)
-            elif ext in video_extensions:
-                dest_path = os.path.join(videos_dir, filename)
-                shutil.move(file_path, dest_path)
+# File organization function removed.
+# Files are now organized at download time using the file_path stored in DB
+# (download logic moves files into per-user images/videos when saving).
 
 def scrape_html(username, times=5):
     with Camoufox() as browser:
@@ -351,8 +327,8 @@ class TASK2ManualInstaGuiApp:
             # Lấy timestamp từ <p class="media-content__meta-time" title="...">
             timestamp = self._extract_timestamp_from_content(div)
             
-            # Chuyển timestamp thành tên file hợp lệ
-            filename = self._timestamp_to_filename(timestamp)
+            # Chuyển timestamp thành tên file hợp lệ (dùng đuôi từ url nếu có)
+            filename = self._timestamp_to_filename(timestamp, url) 
 
             results.append({
                 'url': url,
@@ -398,13 +374,24 @@ class TASK2ManualInstaGuiApp:
             return p_tag.get('title')
         return None
 
-    def _timestamp_to_filename(self, timestamp):
+    def _timestamp_to_filename(self, timestamp, url=None):
         """
         Chuyển timestamp thành tên file hợp lệ.
-        Ví dụ: "7/6/2025, 8:46:19 AM" -> "2025-07-06_08-46-19"
+        Nếu `url` được cung cấp, sẽ lấy phần đuôi (extension) từ path của URL và gán cho file.
+        Ví dụ: "7/6/2025, 8:46:19 AM" + url ending with .jpg -> "2025-07-06_08-46-19.jpg"
         """
+        # Helper: lấy extension từ URL nếu có
+        ext = ""
+        try:
+            if url:
+                _, ext = os.path.splitext(url or "")
+                if ext:
+                    ext = ext.lower()
+        except Exception:
+            ext = ""
+
         if not timestamp:
-            return "file.bin"
+            return "file" + (ext if ext else ".bin")
 
         try:
             # Thử parse timestamp (ví dụ: "7/6/2025, 8:46:19 AM")
@@ -413,49 +400,15 @@ class TASK2ManualInstaGuiApp:
             for fmt in ["%m/%d/%Y, %I:%M:%S %p", "%d/%m/%Y, %H:%M:%S", "%Y-%m-%d, %H:%M:%S"]:
                 try:
                     dt = datetime.strptime(timestamp.strip(), fmt)
-                    return dt.strftime("%Y-%m-%d_%H-%M-%S.bin")
+                    return dt.strftime("%Y-%m-%d_%H-%M-%S") + (ext if ext else ".bin")
                 except ValueError:
                     continue
             
             # Nếu không parse được, dùng timestamp trực tiếp, loại bỏ ký tự không hợp lệ
             filename = re.sub(r'[<>:"/\\|?*]', '_', timestamp)
-            return filename + ".bin"
+            return filename + (ext if ext else ".bin")
         except Exception:
-            return "file.bin"
-
-    def _get_filename_from_url(self, url, index):
-        """
-        Lấy filename từ URL hoặc dùng auto_number.
-
-        :param url: URL cần download
-        :param index: số thứ tự (để dùng auto_number nếu không tìm được filename)
-        :return: filename
-        """
-        try:
-            # Thử lấy từ query parameter 'filename'
-            parsed = urlparse(url)
-            params = parse_qs(parsed.query)
-            if "filename" in params and params["filename"]:
-                filename = params["filename"][0]
-                if filename:
-                    return filename
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Thử extract từ path
-        try:
-            parsed = urlparse(url)
-            path = parsed.path
-            if path:
-                filename = os.path.basename(path)
-                if filename and "." in filename:
-                    return filename
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Nếu không tìm được, dùng auto_number
-        # Thử đoán extension từ Content-Type hoặc dùng .bin
-        return f"file_{index}.bin"
+            return "file" + (ext if ext else ".bin")
 
     def _write_log(self, log_path, message):
         """
@@ -471,14 +424,13 @@ class TASK2ManualInstaGuiApp:
         except Exception as e:
             print(f"Lỗi ghi log: {e}")
 
-    def _download_link(self, url, save_dir, filename_base=None, index=None, progress_callback=None):
+    def _download_link(self, url, file_path, index=None, progress_callback=None):
         """
-        Download một link cụ thể.
+        Download một link cụ thể và lưu trực tiếp vào `file_path` (absolute path or path relative to process cwd).
 
         :param url: URL cần download
-        :param save_dir: thư mục lưu file
-        :param filename_base: tên file cơ bản (không có extension)
-        :param index: số thứ tự (dùng khi không có filename_base)
+        :param file_path: đường dẫn file đầy đủ (absolute) hoặc tương đối để lưu
+        :param index: số thứ tự (dùng khi cần hiển thị progress)
         :param progress_callback: hàm callback (index, total, url, status_msg)
         :return: saved absolute file path as string nếu thành công, None nếu thất bại
         """
@@ -495,38 +447,35 @@ class TASK2ManualInstaGuiApp:
             response = requests.get(url, headers=headers, timeout=30, stream=True)
             response.raise_for_status()
 
-            # Lấy filename
-            if filename_base:
-                filename = filename_base
-            else:
-                filename = self._get_filename_from_url(url, index)
-
-            # Nếu không có extension, thử đoán từ Content-Type
-            if "." not in filename or filename.endswith(".bin"):
+            # Nếu file_path không có extension, thử đoán từ Content-Type
+            base, ext = os.path.splitext(file_path)
+            if not ext or ext == "":
                 content_type = response.headers.get("Content-Type", "")
-                base, ext = os.path.splitext(filename)
                 if "image/jpeg" in content_type or "image/jpg" in content_type:
-                    filename = f"{base}.jpg"
+                    file_path = f"{base}.jpg"
                 elif "image/png" in content_type:
-                    filename = f"{base}.png"
+                    file_path = f"{base}.png"
                 elif "video/mp4" in content_type:
-                    filename = f"{base}.mp4"
+                    file_path = f"{base}.mp4"
                 elif "image/gif" in content_type:
-                    filename = f"{base}.gif"
+                    file_path = f"{base}.gif"
+                else:
+                    # fallback to .bin
+                    file_path = f"{base}.bin"
 
             # Đảm bảo filename không có ký tự không hợp lệ
-            filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-
-            file_path = os.path.join(save_dir, filename)
+            dir_name = os.path.dirname(file_path)
+            file_name = os.path.basename(file_path)
+            file_name = re.sub(r'[<>:"/\\|?*]', "_", file_name)
+            file_path = os.path.join(dir_name, file_name)
 
             # Tránh overwrite nếu file đã tồn tại
             if os.path.exists(file_path):
-                base, ext = os.path.splitext(filename)
+                base, ext = os.path.splitext(file_name)
                 counter = 1
-                while os.path.exists(file_path):
-                    new_filename = f"{base}_{counter}{ext}"
-                    file_path = os.path.join(save_dir, new_filename)
+                while os.path.exists(os.path.join(dir_name, f"{base}_{counter}{ext}")):
                     counter += 1
+                file_path = os.path.join(dir_name, f"{base}_{counter}{ext}")
 
             # Download và lưu file
             with open(file_path, "wb") as f:
@@ -538,7 +487,7 @@ class TASK2ManualInstaGuiApp:
                 progress_callback(index, None, url, f"Đã tải: {os.path.basename(file_path)}")
 
             # Trả về đường dẫn file đã lưu (absolute path) để caller có thể cập nhật DB chính xác
-            return file_path
+            return os.path.abspath(file_path)
 
         except Exception as e:  # noqa: BLE001
             if progress_callback:
@@ -673,10 +622,22 @@ class TASK2ManualInstaGuiApp:
                     for link_data in links_data:
                         url = link_data['url']
                         timestamp = link_data['timestamp']
+                        filename = link_data['filename']
 
-                        # Sinh tên file từ timestamp và tạo file_path tương đối theo username
-                        filename = self._timestamp_to_filename(timestamp)
-                        file_path = os.path.join(username, filename)
+                        # Xác định thư mục relative theo loại file (images/videos) dựa trên ext
+                        base, ext = os.path.splitext(filename)
+                        ext = ext.lower()
+                        image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+                        video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
+
+                        if ext in image_extensions:
+                            rel_dir = os.path.join(username, "images")
+                        elif ext in video_extensions:
+                            rel_dir = os.path.join(username, "videos")
+                        else:
+                            rel_dir = username
+
+                        file_path = os.path.join(rel_dir, filename)
 
                         if self.db.insert_or_ignore(username, url, timestamp, file_path):
                             insert_count += 1
@@ -733,16 +694,18 @@ class TASK2ManualInstaGuiApp:
                     timestamp = row['timestamp'] if hasattr(row, 'keys') else row[3]
                     orig_file_path = row['file_path'] if hasattr(row, 'keys') else (row[4] if len(row) > 4 else None)
                     
-                    # Tạo thư mục nếu cần
-                    save_dir = os.path.join(folder, username)
-                    os.makedirs(save_dir, exist_ok=True)
-                    
-                    # Use the filename previously generated during scrape as filename_base
+                    # Tạo thư mục và xác định nơi lưu file dựa trên file_path trong DB (nếu có)
                     if orig_file_path:
+                        # Nếu DB đã có relative file_path (ví dụ: username/images/file.jpg), ghi trực tiếp vào thư mục đó
+                        rel_dir = os.path.dirname(orig_file_path) or username
+                        save_dir = os.path.join(folder, rel_dir)
                         filename_base = os.path.basename(orig_file_path)
                     else:
-                        filename_base = self._timestamp_to_filename(timestamp)
-                    
+                        save_dir = os.path.join(folder, username)
+                        filename_base = self._timestamp_to_filename(timestamp, url)
+
+                    os.makedirs(save_dir, exist_ok=True)
+
                     # Update progress
                     self.root.after(
                         0,
@@ -752,40 +715,48 @@ class TASK2ManualInstaGuiApp:
                         url[:50] + "...",
                         f"Tải ({idx}/{total}): {username}"
                     )
-                    
+
                     # Download file (returns absolute saved path or None)
-                    saved_abspath = self._download_link(url, save_dir, filename_base=filename_base, index=idx)
+                    target_path = os.path.join(save_dir, filename_base)
+                    saved_abspath = self._download_link(url, target_path, index=idx)
                     if saved_abspath:
-                        # Xác định thư mục đích theo loại file (images/videos)
-                        _, ext = os.path.splitext(saved_abspath)
-                        ext = ext.lower()
-                        image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
-                        video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
-
-                        if ext in image_extensions:
-                            dest_dir = os.path.join(folder, username, "images")
-                        elif ext in video_extensions:
-                            dest_dir = os.path.join(folder, username, "videos")
+                        if orig_file_path:
+                            # File đã được lưu ngay vào vị trí mong muốn; cập nhật DB bằng relative path
+                            rel_path = os.path.relpath(saved_abspath, folder)
+                            self.db.update_download_status(download_id, 'ready', rel_path)
+                            success_count += 1
+                            self._write_log(log_path, f"✓ ID={download_id}, {username}: {rel_path}")
                         else:
-                            dest_dir = os.path.join(folder, username)
+                            # Xác định thư mục đích theo loại file (images/videos) cho các mục không có file_path trong DB
+                            _, ext = os.path.splitext(saved_abspath)
+                            ext = ext.lower()
+                            image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+                            video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
 
-                        os.makedirs(dest_dir, exist_ok=True)
-                        dest_path = os.path.join(dest_dir, os.path.basename(saved_abspath))
+                            if ext in image_extensions:
+                                dest_dir = os.path.join(folder, username, "images")
+                            elif ext in video_extensions:
+                                dest_dir = os.path.join(folder, username, "videos")
+                            else:
+                                dest_dir = os.path.join(folder, username)
 
-                        # Move file to destination if needed
-                        try:
-                            if os.path.abspath(saved_abspath) != os.path.abspath(dest_path):
-                                shutil.move(saved_abspath, dest_path)
-                        except Exception as e:
-                            # Nếu không thể move, log và tiếp tục với đường dẫn gốc
-                            self._write_log(log_path, f"⚠ ID={download_id}, {username}: Không thể di chuyển file: {e}")
-                            dest_path = saved_abspath
+                            os.makedirs(dest_dir, exist_ok=True)
+                            dest_path = os.path.join(dest_dir, os.path.basename(saved_abspath))
 
-                        # Lưu relative path so với base folder trong DB
-                        rel_path = os.path.relpath(dest_path, folder)
-                        self.db.update_download_status(download_id, 'ready', rel_path)
-                        success_count += 1
-                        self._write_log(log_path, f"✓ ID={download_id}, {username}: {rel_path}")
+                            # Move file to destination if needed
+                            try:
+                                if os.path.abspath(saved_abspath) != os.path.abspath(dest_path):
+                                    shutil.move(saved_abspath, dest_path)
+                            except Exception as e:
+                                # Nếu không thể move, log và tiếp tục với đường dẫn gốc
+                                self._write_log(log_path, f"⚠ ID={download_id}, {username}: Không thể di chuyển file: {e}")
+                                dest_path = saved_abspath
+
+                            # Lưu relative path so với base folder trong DB
+                            rel_path = os.path.relpath(dest_path, folder)
+                            self.db.update_download_status(download_id, 'ready', rel_path)
+                            success_count += 1
+                            self._write_log(log_path, f"✓ ID={download_id}, {username}: {rel_path}")
                     else:
                         fail_count += 1
                         self._write_log(log_path, f"✗ ID={download_id}, {username}: Lỗi tải")
@@ -795,12 +766,7 @@ class TASK2ManualInstaGuiApp:
                     self._write_log(log_path, f"✗ Exception: {str(e)}")
                     continue
             
-            # Tổ chức file
-            for username in set(row[1] for row in pending):
-                user_dir = os.path.join(folder, username)
-                if os.path.exists(user_dir):
-                    organize_files_by_type(user_dir)
-            
+            # Files are already moved into per-user images/videos during download; no extra organization step needed.
             stats = self.db.get_stats()
             self._write_log(log_path, f"Kết quả: {success_count} thành công, {fail_count} thất bại")
             self._write_log(log_path, f"Thống kê DB: Total={stats['total']}, Pending={stats['pending']}, Ready={stats['ready']}")
@@ -819,10 +785,6 @@ class TASK2ManualInstaGuiApp:
             self.status_var.set(f"{msg} ({idx}/{total}) - {url_display}")
         else:
             self.status_var.set(f"{msg} ({idx}/{total})")
-
-    def _on_download_finished(self):
-        self.start_button.config(state="normal")
-        messagebox.showinfo("Hoàn thành", "Quá trình tải đã kết thúc.")
 
     def _on_scrape_finished(self):
         """Callback khi scrape xong."""
