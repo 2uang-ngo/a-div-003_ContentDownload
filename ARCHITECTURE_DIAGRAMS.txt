@@ -1,0 +1,331 @@
+# SQLite Database Architecture Diagram
+
+## System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   Instagram Content Downloader                  │
+│                    with SQLite Database                         │
+└─────────────────────────────────────────────────────────────────┘
+
+     ┌─────────────────┐         ┌──────────────────┐
+     │   GUI App       │         │  downloads.db    │
+     │  (Tkinter)      │────────→│  (SQLite)        │
+     │                 │         │                  │
+     │  ┌───────────┐  │         │  ┌────────────┐ │
+     │  │ Scrape    │  │         │  │ downloads  │ │
+     │  │ Button    │  │         │  │ table      │ │
+     │  └───────────┘  │         │  └────────────┘ │
+     │                 │         │                  │
+     │  ┌───────────┐  │         │  Columns:       │
+     │  │ Download  │  │         │  ├─ id         │
+     │  │ Worker    │  │         │  ├─ username   │
+     │  │ Button    │  │         │  ├─ url        │
+     │  └───────────┘  │         │  ├─ timestamp  │
+     │                 │         │  ├─ file_path  │
+     │  Progress Bar   │         │  ├─ status     │
+     │  Status Labels  │         │  ├─ created_at │
+     │                 │         │  └─ updated_at │
+     └─────────────────┘         └──────────────────┘
+```
+
+---
+
+## Data Flow Diagram
+
+```
+                    SESSION 1: SCRAPING
+                    ═════════════════════
+
+    ┌─────────────────────────────────────────────────────┐
+    │  User clicks: "Bắt đầu scrape & insert DB"         │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  For each username:                                │
+    │  1. Open gramsnap.com                             │
+    │  2. Search and scroll                             │
+    │  3. Extract URLs and timestamps                   │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  INSERT OR IGNORE each URL into database:          │
+    │  (username, url, timestamp, status='pending')      │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  Database Stats Popup:                            │
+    │  Total: 100, Pending: 100, Ready: 0               │
+    │                                                    │
+    │  User: "Tải file từ DB" button is now enabled     │
+    └─────────────────────────────────────────────────────┘
+
+
+                    SESSION 2: DOWNLOADING
+                    ══════════════════════
+
+    ┌─────────────────────────────────────────────────────┐
+    │  User clicks: "Tải file từ DB"                     │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  Query: SELECT * WHERE status='pending'            │
+    │  Result: 100 pending records found                 │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  For each pending record:                          │
+    │  1. Download file from URL                         │
+    │  2. Save with timestamp filename                   │
+    │  3. UPDATE database:                               │
+    │     status='ready', file_path='username/file.jpg'  │
+    │  4. Update progress bar                            │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  Files organized:                                  │
+    │  ├─ username1/                                     │
+    │  │  ├─ images/                                     │
+    │  │  │  ├─ photo1.jpg                              │
+    │  │  │  └─ photo2.png                              │
+    │  │  └─ videos/                                     │
+    │  │     └─ video1.mp4                              │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  Database Stats Popup:                            │
+    │  Total: 100, Pending: 0, Ready: 100               │
+    │  (All downloads complete!)                         │
+    └─────────────────────────────────────────────────────┘
+
+
+                    SESSION 3: ADD MORE USERS
+                    ═════════════════════════
+
+    ┌─────────────────────────────────────────────────────┐
+    │  User adds new usernames to text area              │
+    │  Clicks: "Bắt đầu scrape & insert DB"             │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  New URLs from new users are scraped               │
+    │  INSERT OR IGNORE:                                 │
+    │  - New URLs → inserted as pending                  │
+    │  - Old URLs → skipped (UNIQUE constraint)          │
+    └──────────────────────┬──────────────────────────────┘
+                           ↓
+    ┌─────────────────────────────────────────────────────┐
+    │  Database Stats Popup:                            │
+    │  Total: 150, Pending: 50, Ready: 100              │
+    │                                                    │
+    │  User can now download only the new 50            │
+    │  by clicking "Tải file từ DB"                     │
+    └─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Database State Transitions
+
+```
+┌──────────┐
+│ Scrape   │  INSERT OR IGNORE
+│ Phase    │─────────────────→ ┌──────────────┐
+└──────────┘                   │ 'pending'    │
+                               │ status       │
+                               └──────┬───────┘
+                                      │
+                                      │ User clicks
+                                      │ "Tải file từ DB"
+                                      ↓
+                               ┌──────────────┐
+                               │   Worker     │
+                               │   Downloads  │
+                               └──────┬───────┘
+                                      │
+                                      │ Success
+                                      ↓
+                               ┌──────────────┐
+                               │ 'ready'      │
+                               │ status       │
+                               │ file_path set│
+                               └──────────────┘
+```
+
+---
+
+## Database Table Schema
+
+```
+downloads table:
+┌────┬──────────┬────────┬───────────┬──────────┬─────────┬────────┬──────────┐
+│ id │ username │ url    │ timestamp │file_path │ status  │created │ updated  │
+├────┼──────────┼────────┼───────────┼──────────┼─────────┼────────┼──────────┤
+│ 1  │ user1    │ url1   │ 2025-... │ user1/   │pending  │2025-...│2025-...  │
+│    │          │        │           │ photo1.  │         │        │          │
+│    │          │        │           │ jpg      │         │        │          │
+├────┼──────────┼────────┼───────────┼──────────┼─────────┼────────┼──────────┤
+│ 2  │ user1    │ url2   │ 2025-... │ user1/   │ready    │2025-...│2025-...  │
+│    │          │        │           │ video1.  │         │        │          │
+│    │          │        │           │ mp4      │         │        │          │
+├────┼──────────┼────────┼───────────┼──────────┼─────────┼────────┼──────────┤
+│ 3  │ user2    │ url3   │ 2025-... │ null     │pending  │2025-...│2025-...  │
+└────┴──────────┴────────┴───────────┴──────────┴─────────┴────────┴──────────┘
+
+CONSTRAINTS:
+- PRIMARY KEY: id (auto-increment)
+- UNIQUE: url (prevents duplicates)
+- DEFAULT: status = 'pending'
+- DEFAULT: created_at = CURRENT_TIMESTAMP
+```
+
+---
+
+## Class Hierarchy
+
+```
+Auto_Insta_Downloader.py
+│
+├─ DownloadDatabase
+│  ├─ __init__(db_path)
+│  ├─ init_database()           # Create schema
+│  ├─ insert_or_ignore(...)     # Add to DB
+│  ├─ get_pending_downloads()   # Query pending
+│  ├─ update_download_status()  # Update status
+│  ├─ get_download_by_id()      # Query single
+│  └─ get_stats()               # Get statistics
+│
+├─ TASK2ManualInstaGuiApp(tk.Tk)
+│  ├─ __init__()
+│  ├─ _build_ui()
+│  ├─ on_start()                # Scrape button handler
+│  ├─ on_start_worker()         # Worker button handler
+│  ├─ _run_scrape_only_multi_thread()    # Scrape logic
+│  ├─ _run_download_worker_thread()      # Download logic
+│  ├─ _download_link()
+│  ├─ _parse_links_from_text()
+│  ├─ _timestamp_to_filename()
+│  ├─ _write_log()
+│  ├─ _on_scrape_finished()     # Scrape callback
+│  ├─ _on_worker_finished()     # Worker callback
+│  ├─ _update_progress_ui()
+│  ├─ _load_config()
+│  ├─ _save_config()
+│  └─ on_close()
+│
+└─ Helper functions
+   ├─ scrape_html()
+   ├─ organize_files_by_type()
+   └─ main()
+```
+
+---
+
+## File Organization
+
+```
+Base Folder (e.g., D:/Downloads/Instagram)
+│
+├── downloads.db                    ← SQLite Database
+├── log.txt                         ← Operation logs
+├── config.json                     ← Configuration
+│
+├── username1/
+│   ├── images/
+│   │   ├── 2025-01-28_10-30-15.jpg
+│   │   ├── 2025-01-28_10-35-20.png
+│   │   └── ...
+│   └── videos/
+│       ├── 2025-01-28_11-00-00.mp4
+│       └── ...
+│
+└── username2/
+    ├── images/
+    │   └── ...
+    └── videos/
+        └── ...
+```
+
+---
+
+## Query Examples
+
+### Get all pending downloads
+```sql
+SELECT id, username, url FROM downloads WHERE status = 'pending';
+```
+
+### Count by status
+```sql
+SELECT status, COUNT(*) as count FROM downloads GROUP BY status;
+```
+
+### Get statistics
+```sql
+SELECT 
+  COUNT(*) as total,
+  SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+  SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready
+FROM downloads;
+```
+
+### Get all files for a user
+```sql
+SELECT id, url, status, file_path FROM downloads WHERE username = 'user1';
+```
+
+### Retry failed downloads
+```sql
+UPDATE downloads SET status = 'pending' WHERE status = 'ready' AND file_path IS NULL;
+```
+
+---
+
+## Performance Characteristics
+
+```
+Operation        │ Time        │ Rows        │ Notes
+─────────────────┼─────────────┼─────────────┼──────────────────────
+Scrape 5 users   │ 30-60 sec   │ 100-200     │ Network dependent
+Insert 100 URLs  │ <100ms      │ 100         │ Mostly index overhead
+Query pending    │ <10ms       │ 1000+       │ Fast with index
+Download 1 file  │ 1-10 sec    │ 1           │ File size dependent
+Update status    │ <5ms        │ 1           │ Very fast
+Get stats        │ <20ms       │ N/A         │ Always fast
+```
+
+---
+
+## Error Handling Flow
+
+```
+┌─────────────────────────────────┐
+│      User Action                │
+└────────────┬────────────────────┘
+             ↓
+    ┌────────────────────┐
+    │   Try Operation    │
+    └────────┬───────────┘
+             ↓
+    ┌────────────────────┐
+    │  Success?          │
+    └────────┬───────────┘
+       Yes ↙   ↘ No
+       ↓         ↓
+    ┌──────┐  ┌─────────────────────┐
+    │ Log  │  │ Log Error           │
+    │ OK   │  │ Continue/Skip       │
+    └──────┘  │ Update Progress     │
+             │ Show in UI          │
+             └─────────────────────┘
+             ↓
+    ┌────────────────────┐
+    │ Finish Operation   │
+    │ Show Stats         │
+    └────────────────────┘
+```
+
+---
+
+Generated: 2025-01-28
+Diagrams show the complete SQLite database integration architecture.
